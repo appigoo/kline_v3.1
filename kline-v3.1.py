@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
+import numpy as np  # 新增：用于OBV中的np.sign
 
 st.set_page_config(page_title="股票監控儀表板", layout="wide")
 
@@ -74,6 +75,36 @@ def calculate_rsi(data, periods=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+# 新增：VWAP 计算函数
+def calculate_vwap(data):
+    typical_price = (data['High'] + data['Low'] + data['Close']) / 3
+    vwap = (typical_price * data['Volume']).cumsum() / data['Volume'].cumsum()
+    return vwap
+
+# 新增：MFI 计算函数
+def calculate_mfi(data, periods=14):
+    typical_price = (data['High'] + data['Low'] + data['Close']) / 3
+    money_flow = typical_price * data['Volume']
+    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=periods).sum()
+    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=periods).sum()
+    money_ratio = positive_flow / negative_flow
+    mfi = 100 - (100 / (1 + money_ratio))
+    return mfi
+
+# 新增：OBV 计算函数
+def calculate_obv(data):
+    obv = (np.sign(data['Close'].diff()) * data['Volume']).fillna(0).cumsum()
+    return obv
+
+# 新增：VIX 获取函数
+def get_vix_data(period, interval):
+    vix_ticker = yf.Ticker("^VIX")
+    vix_data = vix_ticker.history(period=period, interval=interval).reset_index()
+    if "Date" in vix_data.columns:
+        vix_data = vix_data.rename(columns={"Date": "Datetime"})
+    vix_data["VIX Change %"] = vix_data["Close"].pct_change().round(4) * 100
+    return vix_data
+
 # 计算所有信号的成功率
 def calculate_signal_success_rate(data):
     data["Next_Close_Higher"] = data["Close"].shift(-1) > data["Close"]
@@ -87,7 +118,8 @@ def calculate_signal_success_rate(data):
         "📉 衰竭跳空(下)", "📉 連續向下賣出", "📉 SMA50下降趨勢", "📉 SMA50_200下降趨勢", 
         "📉 新卖出信号", "📉 RSI-MACD Overbought Crossover", "📉 EMA-SMA Downtrend Sell", 
         "📉 Volume-MACD Sell", "📉 EMA10_30賣出", "📉 EMA10_30_40強烈賣出", "📉 看跌吞沒", 
-        "📉 上吊線", "📉 黃昏之星"
+        "📉 上吊線", "📉 黃昏之星", "📉 VWAP賣出", "📉 MFI熊背離賣出", "📉 OBV量能確認賣出",
+        "📉 VIX恐慌賣出"
     ]
     
     all_signals = set()
@@ -120,7 +152,7 @@ def calculate_signal_success_rate(data):
     
     return success_rates
 
-# 邮件发送函数
+# 邮件发送函数（新增参数）
 def send_email_alert(ticker, price_pct, volume_pct, low_high_signal=False, high_low_signal=False, 
                      macd_buy_signal=False, macd_sell_signal=False, ema_buy_signal=False, ema_sell_signal=False,
                      price_trend_buy_signal=False, price_trend_sell_signal=False,
@@ -135,7 +167,13 @@ def send_email_alert(ticker, price_pct, volume_pct, low_high_signal=False, high_
                      ema10_30_buy_signal=False, ema10_30_40_strong_buy_signal=False,
                      ema10_30_sell_signal=False, ema10_30_40_strong_sell_signal=False,
                      bullish_engulfing=False, bearish_engulfing=False, hammer=False, hanging_man=False,
-                     morning_star=False, evening_star=False):
+                     morning_star=False, evening_star=False,
+                     # 新增参数
+                     vwap_buy_signal=False, vwap_sell_signal=False,
+                     mfi_bull_divergence=False, mfi_bear_divergence=False,
+                     obv_breakout_buy=False, obv_breakout_sell=False,
+                     # 新增 VIX 参数
+                     vix_panic_sell=False, vix_calm_buy=False):
     subject = f"📣 股票異動通知：{ticker}"
     body = f"""
     股票代號：{ticker}
@@ -220,6 +258,24 @@ def send_email_alert(ticker, price_pct, volume_pct, low_high_signal=False, high_
         body += f"\n📈 早晨之星：下跌後出現小實體K線，隨後強烈看漲K線，預示反轉！"
     if evening_star:
         body += f"\n📉 黃昏之星：上漲後出現小實體K線，隨後強烈看跌K線，預示反轉！"
+    # 新增：VWAP、MFI、OBV 描述
+    if vwap_buy_signal:
+        body += f"\n📈 VWAP 買入訊號：價格上穿 VWAP，作為主進場基準！"
+    if vwap_sell_signal:
+        body += f"\n📉 VWAP 賣出訊號：價格下破 VWAP，作為主出場基準！"
+    if mfi_bull_divergence:
+        body += f"\n📈 MFI 牛背離買入：價格新低但 MFI 未新低，偵測超賣背離！"
+    if mfi_bear_divergence:
+        body += f"\n📉 MFI 熊背離賣出：價格新高但 MFI 未新高，偵測超買背離！"
+    if obv_breakout_buy:
+        body += f"\n📈 OBV 突破買入：OBV 新高確認價格上漲量能！"
+    if obv_breakout_sell:
+        body += f"\n📉 OBV 突破賣出：OBV 新低確認價格下跌量能！"
+    # 新增：VIX 描述
+    if vix_panic_sell:
+        body += f"\n📉 VIX 恐慌賣出訊號：VIX > 30 且上升，市場恐慌加劇！"
+    if vix_calm_buy:
+        body += f"\n📈 VIX 平靜買入訊號：VIX < 20 且下降，市場穩定！"
     
     body += "\n系統偵測到異常變動，請立即查看市場情況。"
     msg = MIMEMultipart()
@@ -269,7 +325,11 @@ all_signal_types = [
         "📈 衰竭跳空(上)", "📈 連續向上買入", "📈 SMA50上升趨勢", "📈 SMA50_200上升趨勢", 
         "📈 新买入信号", "📈 RSI-MACD Oversold Crossover", "📈 EMA-SMA Uptrend Buy", 
         "📈 Volume-MACD Buy", "📈 EMA10_30買入", "📈 EMA10_30_40強烈買入", "📈 看漲吞沒", 
-        "📈 錘頭線", "📈 早晨之星","✅ 量價","🔄 新转折点"
+        "📈 錘頭線", "📈 早晨之星","✅ 量價","🔄 新转折点",
+        # 新增：VWAP、MFI、OBV 信号
+        "📈 VWAP買入", "📉 VWAP賣出", "📈 MFI牛背離買入", "📉 MFI熊背離賣出", "📈 OBV突破買入", "📉 OBV突破賣出",
+        # 新增：VIX 信号
+        "📉 VIX恐慌賣出", "📈 VIX平靜買入"
     # ...其他K栏位信号. 注意不要遗漏你的所有信号
 ]
 
@@ -284,6 +344,13 @@ selected_signals = st.multiselect(
 BODY_RATIO_THRESHOLD = st.number_input("K線實體占比閾值 (大陽/大陰線)", min_value=0.1, max_value=0.9, value=0.6, step=0.05)
 SHADOW_RATIO_THRESHOLD = st.number_input("K線影線長度閾值 (錘子/射擊線)", min_value=0.1, max_value=3.0, value=2.0, step=0.1)
 DOJI_BODY_THRESHOLD = st.number_input("十字星實體閾值占比", min_value=0.01, max_value=0.2, value=0.1, step=0.01)
+
+# 新增：MFI背离窗口（最小改动，添加一个input）
+MFI_DIVERGENCE_WINDOW = st.number_input("MFI背离检测窗口 (根K線)", min_value=3, max_value=20, value=5, step=1)
+
+# 新增：VIX 阈值
+VIX_HIGH_THRESHOLD = st.number_input("VIX 恐慌閾值 (高)", min_value=20.0, max_value=50.0, value=30.0, step=1.0)
+VIX_LOW_THRESHOLD = st.number_input("VIX 平靜閾值 (低)", min_value=10.0, max_value=25.0, value=20.0, step=1.0)
 
 placeholder = st.empty()
 
@@ -446,6 +513,20 @@ while True:
                 data["EMA40"] = data["Close"].ewm(span=40, adjust=False).mean()
                 data["RSI"] = calculate_rsi(data)
                 
+                # 新增：计算 VWAP、MFI、OBV
+                data["VWAP"] = calculate_vwap(data)
+                data["MFI"] = calculate_mfi(data)
+                data["OBV"] = calculate_obv(data)
+                
+                # 新增：获取 VIX 数据并合并
+                vix_data = get_vix_data(selected_period, selected_interval)
+                if not vix_data.empty:
+                    data = data.merge(vix_data[["Datetime", "Close", "VIX Change %"]], on="Datetime", how="left", suffixes=("", "_VIX"))
+                    data.rename(columns={"Close_VIX": "VIX"}, inplace=True)
+                else:
+                    data["VIX"] = np.nan
+                    data["VIX Change %"] = np.nan
+                
                 data['Up'] = (data['Close'] > data['Close'].shift(1)).astype(int)
                 data['Down'] = (data['Close'] < data['Close'].shift(1)).astype(int)
                 data['Continuous_Up'] = data['Up'] * (data['Up'].groupby((data['Up'] == 0).cumsum()).cumcount() + 1)
@@ -453,6 +534,19 @@ while True:
                 
                 data["SMA50"] = data["Close"].rolling(window=50).mean()
                 data["SMA200"] = data["Close"].rolling(window=200).mean()
+                
+                # 新增：MFI背离检测（预计算列）
+                window = MFI_DIVERGENCE_WINDOW
+                data['Close_Roll_Max'] = data['Close'].rolling(window=window).max()
+                data['MFI_Roll_Max'] = data['MFI'].rolling(window=window).max()
+                data['Close_Roll_Min'] = data['Close'].rolling(window=window).min()
+                data['MFI_Roll_Min'] = data['MFI'].rolling(window=window).min()
+                data['MFI_Bear_Div'] = (data['Close'] == data['Close_Roll_Max']) & (data['MFI'] < data['MFI_Roll_Max'].shift(1))
+                data['MFI_Bull_Div'] = (data['Close'] == data['Close_Roll_Min']) & (data['MFI'] > data['MFI_Roll_Min'].shift(1))
+                
+                # 新增：OBV突破（预计算，20期滚动新高/新低）
+                data['OBV_Roll_Max'] = data['OBV'].rolling(window=20).max()
+                data['OBV_Roll_Min'] = data['OBV'].rolling(window=20).min()
                 
                 def mark_signal(row, index):
                     signals = []
@@ -645,6 +739,31 @@ while True:
                         row["Close"] > (data["Open"].iloc[index-1] + data["Close"].iloc[index-1]) / 2 and  # 收盤高於前日K線中點
                         row["Volume"] > data["前5均量"].iloc[index]):  # 成交量放大
                         signals.append("📈 刺透形態")
+                    # 新增：VWAP信号（作为主进出场基准）
+                    if index > 0 and pd.notna(row["VWAP"]):
+                        if row["Close"] > row["VWAP"] and data["Close"].iloc[index-1] <= data["VWAP"].iloc[index-1]:
+                            signals.append("📈 VWAP買入")
+                        elif row["Close"] < row["VWAP"] and data["Close"].iloc[index-1] >= data["VWAP"].iloc[index-1]:
+                            signals.append("📉 VWAP賣出")
+                    # 新增：MFI背离信号
+                    if index >= MFI_DIVERGENCE_WINDOW and pd.notna(row["MFI"]):
+                        if data['MFI_Bull_Div'].iloc[index]:
+                            signals.append("📈 MFI牛背離買入")
+                        if data['MFI_Bear_Div'].iloc[index]:
+                            signals.append("📉 MFI熊背離賣出")
+                    # 新增：OBV突破信号（确认突破量能）
+                    if index > 0 and pd.notna(row["OBV"]):
+                        if row["Close"] > data["Close"].iloc[index-1] and row["OBV"] > data['OBV_Roll_Max'].iloc[index-1]:
+                            signals.append("📈 OBV突破買入")
+                        elif row["Close"] < data["Close"].iloc[index-1] and row["OBV"] < data['OBV_Roll_Min'].iloc[index-1]:
+                            signals.append("📉 OBV突破賣出")
+                    # 新增：VIX 恐慌指数信号
+                    if index > 0 and pd.notna(row["VIX"]):
+                        vix_prev = data["VIX"].iloc[index-1]
+                        if row["VIX"] > VIX_HIGH_THRESHOLD and row["VIX"] > vix_prev:
+                            signals.append("📉 VIX恐慌賣出")
+                        elif row["VIX"] < VIX_LOW_THRESHOLD and row["VIX"] < vix_prev:
+                            signals.append("📈 VIX平靜買入")
                     return ", ".join(signals) if signals else ""
                 
                 data["異動標記"] = [mark_signal(row, i) for i, row in data.iterrows()]
@@ -652,7 +771,7 @@ while True:
                 # 性能优化：使用缓存函数计算K线形态
                 data = compute_kline_patterns(data, BODY_RATIO_THRESHOLD, SHADOW_RATIO_THRESHOLD, DOJI_BODY_THRESHOLD)
 
-                # 新增：综合解读（最后 5 根 K 线）
+                # 新增：综合解读（最后 5 根 K 线）（最小改动，添加VWAP/MFI/OBV/VIX提及）
                 def generate_comprehensive_interpretation(data):
                     last_5 = data.tail(5)
                     if len(last_5) < 5:
@@ -665,16 +784,21 @@ while True:
                     neutral_count = len(last_5[last_5["K線形態"].isin(["十字星", "普通K線"])])
                     high_volume_count = len(last_5[last_5["成交量標記"] == "放量"])
 
+                    vwap_trend = "多頭（價格>VWAP）" if last_5["Close"].iloc[-1] > last_5["VWAP"].iloc[-1] else "空頭（價格<VWAP）"
+                    mfi_level = f"MFI={last_5['MFI'].iloc[-1]:.1f}（{'超賣背離機會' if last_5['MFI'].iloc[-1] < 20 else '超買背離風險' if last_5['MFI'].iloc[-1] > 80 else '中性'}）"
+                    obv_trend = "OBV上漲確認量能" if last_5["OBV"].iloc[-1] > last_5["OBV"].iloc[0] else "OBV下跌警示量能不足"
+                    vix_level = f"VIX={last_5['VIX'].iloc[-1]:.1f}（{'恐慌高位' if last_5['VIX'].iloc[-1] > VIX_HIGH_THRESHOLD else '平靜低位' if last_5['VIX'].iloc[-1] < VIX_LOW_THRESHOLD else '中性'}）"
+
                     if bullish_count >= 3 and high_volume_count >= 3:
-                        return "最近五日多方主導，出現多根看漲形態（如大陽線或看漲吞噬）且多伴隨放量，市場呈現強勢上漲趨勢，建議關注買入機會。"
+                        return f"最近五日多方主導，出現多根看漲形態（如大陽線或看漲吞噬）且多伴隨放量，市場呈現強勢上漲趨勢，{vwap_trend}，{mfi_level}，{obv_trend}，{vix_level}，建議關注買入機會。"
                     elif bearish_count >= 3 and high_volume_count >= 3:
-                        return "最近五日空方主導，出現多根看跌形態（如大陰線或看跌吞噬）且多伴隨放量，市場呈現強勢下跌趨勢，建議注意賣出風險。"
+                        return f"最近五日空方主導，出現多根看跌形態（如大陰線或看跌吞噬）且多伴隨放量，市場呈現強勢下跌趨勢，{vwap_trend}，{mfi_level}，{obv_trend}，{vix_level}，建議注意賣出風險。"
                     elif neutral_count >= 3:
-                        return "最近五日多空交戰，型態以十字星或普通K線為主，成交量無明顯趨勢，市場處於盤整或方向不明階段。"
+                        return f"最近五日多空交戰，型態以十字星或普通K線為主，成交量無明顯趨勢，市場處於盤整或方向不明階段，{vwap_trend}，{mfi_level}，{obv_trend}，{vix_level}。"
                     elif bullish_count >= 2 and bearish_count >= 2:
-                        return "最近五日多空激烈爭奪，看漲與看跌形態交替出現，成交量變化不一，市場方向不明，建議觀望。"
+                        return f"最近五日多空激烈爭奪，看漲與看跌形態交替出現，成交量變化不一，市場方向不明，建議觀望，{vwap_trend}，{mfi_level}，{obv_trend}，{vix_level}。"
                     else:
-                        return "最近五日市場型態與成交量無明顯趨勢，建議持續觀察後續動向。"
+                        return f"最近五日市場型態與成交量無明顯趨勢，建議持續觀察後續動向，{vwap_trend}，{mfi_level}，{obv_trend}，{vix_level}。"
 
                 comprehensive_interpretation = generate_comprehensive_interpretation(data)
 
@@ -796,6 +920,18 @@ while True:
                                 data["Volume"].iloc[-1] > data["前5均量"].iloc[-1] and 
                                 data["RSI"].iloc[-1] > 50)
                 
+                # 新增：VWAP、MFI、OBV 当前信号检测
+                vwap_buy_signal = len(data) > 1 and pd.notna(data["VWAP"].iloc[-1]) and data["Close"].iloc[-1] > data["VWAP"].iloc[-1] and data["Close"].iloc[-2] <= data["VWAP"].iloc[-2]
+                vwap_sell_signal = len(data) > 1 and pd.notna(data["VWAP"].iloc[-1]) and data["Close"].iloc[-1] < data["VWAP"].iloc[-1] and data["Close"].iloc[-2] >= data["VWAP"].iloc[-2]
+                mfi_bull_divergence = len(data) > MFI_DIVERGENCE_WINDOW and data['MFI_Bull_Div'].iloc[-1]
+                mfi_bear_divergence = len(data) > MFI_DIVERGENCE_WINDOW and data['MFI_Bear_Div'].iloc[-1]
+                obv_breakout_buy = len(data) > 1 and data["Close"].iloc[-1] > data["Close"].iloc[-2] and data["OBV"].iloc[-1] > data['OBV_Roll_Max'].iloc[-2]
+                obv_breakout_sell = len(data) > 1 and data["Close"].iloc[-1] < data["Close"].iloc[-2] and data["OBV"].iloc[-1] < data['OBV_Roll_Min'].iloc[-2]
+                
+                # 新增：VIX 当前信号检测
+                vix_panic_sell = len(data) > 1 and pd.notna(data["VIX"].iloc[-1]) and data["VIX"].iloc[-1] > VIX_HIGH_THRESHOLD and data["VIX"].iloc[-1] > data["VIX"].iloc[-2]
+                vix_calm_buy = len(data) > 1 and pd.notna(data["VIX"].iloc[-1]) and data["VIX"].iloc[-1] < VIX_LOW_THRESHOLD and data["VIX"].iloc[-1] < data["VIX"].iloc[-2]
+                
                 # 跳空信号检测
                 gap_common_up = False
                 gap_common_down = False
@@ -863,6 +999,11 @@ while True:
                 st.metric(f"{ticker} 🔵 成交量變動", f"{last_volume:,}",
                           f"{volume_change:,} ({volume_pct_change:.2f}%)")
 
+                # 新增：VIX 指标显示
+                if pd.notna(data["VIX"].iloc[-1]):
+                    st.metric(f"{ticker} ⚡ VIX 恐慌指數", f"{data['VIX'].iloc[-1]:.2f}",
+                              f"{data['VIX Change %'].iloc[-1]:.2f}%" if pd.notna(data['VIX Change %'].iloc[-1]) else "N/A")
+
                 # 计算并显示所有信号的成功率
                 success_rates = calculate_signal_success_rate(data)
                 st.subheader(f"📊 {ticker} 各信号成功率")
@@ -901,8 +1042,8 @@ while True:
                 st.subheader(f"📝 {ticker} 綜合解讀")
                 st.write(comprehensive_interpretation)
 
-                # 异动提醒 + Email 推播
-                if (abs(price_pct_change) >= PRICE_THRESHOLD and abs(volume_pct_change) >= VOLUME_THRESHOLD) or low_high_signal or high_low_signal or macd_buy_signal or macd_sell_signal or ema_buy_signal or ema_sell_signal or price_trend_buy_signal or price_trend_sell_signal or price_trend_vol_buy_signal or price_trend_vol_sell_signal or price_trend_vol_pct_buy_signal or price_trend_vol_pct_sell_signal or gap_common_up or gap_common_down or gap_breakaway_up or gap_breakaway_down or gap_runaway_up or gap_runaway_down or gap_exhaustion_up or gap_exhaustion_down or continuous_up_buy_signal or continuous_down_sell_signal or sma50_up_trend or sma50_down_trend or sma50_200_up_trend or sma50_200_down_trend or new_buy_signal or new_sell_signal or new_pivot_signal or ema10_30_buy_signal or ema10_30_40_strong_buy_signal or ema10_30_sell_signal or ema10_30_40_strong_sell_signal or bullish_engulfing or bearish_engulfing or hammer or hanging_man or morning_star or evening_star:
+                # 异动提醒 + Email 推播（新增 or 新信号）
+                if (abs(price_pct_change) >= PRICE_THRESHOLD and abs(volume_pct_change) >= VOLUME_THRESHOLD) or low_high_signal or high_low_signal or macd_buy_signal or macd_sell_signal or ema_buy_signal or ema_sell_signal or price_trend_buy_signal or price_trend_sell_signal or price_trend_vol_buy_signal or price_trend_vol_sell_signal or price_trend_vol_pct_buy_signal or price_trend_vol_pct_sell_signal or gap_common_up or gap_common_down or gap_breakaway_up or gap_breakaway_down or gap_runaway_up or gap_runaway_down or gap_exhaustion_up or gap_exhaustion_down or continuous_up_buy_signal or continuous_down_sell_signal or sma50_up_trend or sma50_down_trend or sma50_200_up_trend or sma50_200_down_trend or new_buy_signal or new_sell_signal or new_pivot_signal or ema10_30_buy_signal or ema10_30_40_strong_buy_signal or ema10_30_sell_signal or ema10_30_40_strong_sell_signal or bullish_engulfing or bearish_engulfing or hammer or hanging_man or morning_star or evening_star or vwap_buy_signal or vwap_sell_signal or mfi_bull_divergence or mfi_bear_divergence or obv_breakout_buy or obv_breakout_sell or vix_panic_sell or vix_calm_buy:
                     alert_msg = f"{ticker} 異動：價格 {price_pct_change:.2f}%、成交量 {volume_pct_change:.2f}%"
                     if low_high_signal:
                         alert_msg += "，當前最低價高於前一時段最高價"
@@ -982,6 +1123,24 @@ while True:
                         alert_msg += "，早晨之星（下跌後出現小實體K線，隨後強烈看漲K線，預示反轉）"
                     if evening_star:
                         alert_msg += "，黃昏之星（上漲後出現小實體K線，隨後強烈看跌K線，預示反轉）"
+                    # 新增：VWAP、MFI、OBV 描述
+                    if vwap_buy_signal:
+                        alert_msg += "，VWAP 買入訊號（價格上穿 VWAP，作為主進場基準）"
+                    if vwap_sell_signal:
+                        alert_msg += "，VWAP 賣出訊號（價格下破 VWAP，作為主出場基準）"
+                    if mfi_bull_divergence:
+                        alert_msg += "，MFI 牛背離買入（價格新低但 MFI 未新低，偵測超賣背離）"
+                    if mfi_bear_divergence:
+                        alert_msg += "，MFI 熊背離賣出（價格新高但 MFI 未新高，偵測超買背離）"
+                    if obv_breakout_buy:
+                        alert_msg += "，OBV 突破買入（OBV 新高確認價格上漲量能）"
+                    if obv_breakout_sell:
+                        alert_msg += "，OBV 突破賣出（OBV 新低確認價格下跌量能）"
+                    # 新增：VIX 描述
+                    if vix_panic_sell:
+                        alert_msg += "，VIX 恐慌賣出（VIX > 30 且上升，市場恐慌加劇）"
+                    if vix_calm_buy:
+                        alert_msg += "，VIX 平靜買入（VIX < 20 且下降，市場穩定）"
                     # 新增：加入最新K线形态到提醒
                     if data["K線形態"].iloc[-1] != "普通K線":
                         alert_msg += f"，最新K線形態：{data['K線形態'].iloc[-1]}（{data['單根解讀'].iloc[-1]}）"
@@ -1001,19 +1160,14 @@ while True:
                                     ema10_30_buy_signal, ema10_30_40_strong_buy_signal,
                                     ema10_30_sell_signal, ema10_30_40_strong_sell_signal,
                                     bullish_engulfing, bearish_engulfing, hammer, hanging_man,
-                                    morning_star, evening_star)
+                                    morning_star, evening_star,
+                                    # 新增调用参数
+                                    vwap_buy_signal, vwap_sell_signal,
+                                    mfi_bull_divergence, mfi_bear_divergence,
+                                    obv_breakout_buy, obv_breakout_sell,
+                                    # 新增 VIX 参数
+                                    vix_panic_sell, vix_calm_buy)
 
-                    # ------ 你的数据加载，信号生成，K栏赋值等逻辑 ------
-    
-                    # 假定每次新k线，data['K']已经生成且最后一行为最新信号字符串
-                    # if len(data["異動標記"]) > 0:
-                    #     K_signals = str(data["異動標記"].iloc[-1])  # K栏内容可能是单个信号，也可能是逗号分隔字符串
-                    #     need_alert = any(sig in K_signals for sig in selected_signals)
-                    #     if need_alert:
-                    #         alertmsg = f"{data['Datetime'].iloc[-1]} {ticker}: 出现信号=> {K_signals}"
-                    #         send_telegram_alert(alertmsg)  # Telegram推送
-                            # sendemailalert(...)  # 可保留原有email推送
-                    
                     # 其余原始代码不变
                     if len(data["異動標記"]) > 0:
                         K_signals = str(data["異動標記"].iloc[-1])  # 最新一根K线的信号字符串
@@ -1025,11 +1179,11 @@ while True:
                             alertmsg = f"{data['Datetime'].iloc[-1]} {ticker}:{selected_interval}:$ {data['Close'].iloc[-1].round(2)} 同时出现全部信号 => {', '.join(selected_signals)}"
                             send_telegram_alert(alertmsg)
                     ##########
-                # 添加 K 线图（含 EMA）、成交量柱状图和 RSI 子图
+                # 添加 K 线图（含 EMA）、成交量柱状图和 RSI 子图（新增 VWAP/MFI/OBV traces）
                 st.subheader(f"📈 {ticker} K線圖與技術指標")
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                                    subplot_titles=(f"{ticker} K線與EMA", "成交量", "RSI"),
+                                    subplot_titles=(f"{ticker} K線與EMA/VWAP", "成交量/OBV", "RSI/MFI"),
                                     vertical_spacing=0.1, row_heights=[0.5, 0.2, 0.3])
                 
                 # 添加 K 线图
@@ -1046,14 +1200,31 @@ while True:
                 fig.add_trace(px.line(data.tail(50), x="Datetime", y="EMA30")["data"][0], row=1, col=1)
                 fig.add_trace(px.line(data.tail(50), x="Datetime", y="EMA40")["data"][0], row=1, col=1)
                 
+                # 新增：VWAP 線（主圖）
+                fig.add_trace(go.Scatter(x=data.tail(50)["Datetime"], y=data.tail(50)["VWAP"], 
+                                         mode='lines', name='VWAP', line=dict(color='purple', width=2)), row=1, col=1)
+                
                 # 添加成交量柱状图
                 fig.add_bar(x=data.tail(50)["Datetime"], y=data.tail(50)["Volume"], 
                            name="成交量", opacity=0.5, row=2, col=1)
+                
+                # 新增：OBV 線（成交量子圖，secondary_y）
+                fig.add_trace(go.Scatter(x=data.tail(50)["Datetime"], y=data.tail(50)["OBV"], 
+                                         mode='lines', name='OBV', yaxis="y2", line=dict(color='orange', width=2)), row=2, col=1)
+                fig.add_hline(y=0, line_dash="dash", line_color="black", row=2, col=1)
+                fig.update_layout(yaxis2=dict(overlaying="y", side="right", title="OBV"))
                 
                 # 添加 RSI 子图
                 fig.add_trace(px.line(data.tail(50), x="Datetime", y="RSI")["data"][0], row=3, col=1)
                 fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)  # 超买线
                 fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)  # 超卖线
+                
+                # 新增：MFI 線（RSI子圖，secondary_y）
+                fig.add_trace(go.Scatter(x=data.tail(50)["Datetime"], y=data.tail(50)["MFI"], 
+                                         mode='lines', name='MFI', yaxis="y3", line=dict(color='brown', width=2)), row=3, col=1)
+                fig.add_hline(y=80, line_dash="dash", line_color="red", row=3, col=1, yref="y3")  # MFI超买
+                fig.add_hline(y=20, line_dash="dash", line_color="green", row=3, col=1, yref="y3")  # MFI超卖
+                fig.update_layout(yaxis3=dict(overlaying="y", side="right", title="MFI", range=[0,100]))
                 
                 # 标记 EMA 买入/卖出信号、关键转折点、新买入信号、新卖出信号、新转折点及新EMA信号
                 for i in range(1, len(data.tail(50))):
@@ -1116,6 +1287,32 @@ while True:
                     if "黃昏之星" in data["異動標記"].iloc[idx]:
                         fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
                                          text="📉 黃昏之星", showarrow=True, arrowhead=2, ax=20, ay=30, row=1, col=1)
+                    # 新增：标记新信号
+                    if "📈 VWAP買入" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📈 VWAP買入", showarrow=True, arrowhead=2, ax=20, ay=-30, row=1, col=1)
+                    if "📉 VWAP賣出" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📉 VWAP賣出", showarrow=True, arrowhead=2, ax=20, ay=30, row=1, col=1)
+                    if "📈 MFI牛背離買入" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📈 MFI牛背離", showarrow=True, arrowhead=2, ax=20, ay=-30, row=3, col=1)
+                    if "📉 MFI熊背離賣出" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📉 MFI熊背離", showarrow=True, arrowhead=2, ax=20, ay=30, row=3, col=1)
+                    if "📈 OBV突破買入" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📈 OBV突破", showarrow=True, arrowhead=2, ax=20, ay=-30, row=2, col=1)
+                    if "📉 OBV突破賣出" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📉 OBV突破", showarrow=True, arrowhead=2, ax=20, ay=30, row=2, col=1)
+                    # 新增：VIX 标记
+                    if "📉 VIX恐慌賣出" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📉 VIX恐慌", showarrow=True, arrowhead=2, ax=20, ay=30, row=1, col=1)
+                    if "📈 VIX平靜買入" in data["異動標記"].iloc[idx]:
+                        fig.add_annotation(x=data["Datetime"].iloc[idx], y=data["Close"].iloc[idx],
+                                         text="📈 VIX平靜", showarrow=True, arrowhead=2, ax=20, ay=-30, row=1, col=1)
                 
                 fig.update_layout(yaxis_title="價格", yaxis2_title="成交量", yaxis3_title="RSI", showlegend=True)
                 st.plotly_chart(fig, use_container_width=True, key=f"chart_{ticker}_{timestamp}")
@@ -1250,12 +1447,12 @@ while True:
                 else:
                     st.write("無有效數據範圍可顯示")
 
-                # 显示含异动标记的历史资料
+                # 显示含异动标记的历史资料（新增列：VWAP, MFI, OBV, VIX）
                 st.subheader(f"📋 歷史資料：{ticker}")
                 display_data = data[["Datetime","Low","High", "Close", "Volume", "Price Change %", 
                                      "Volume Change %", "📈 股價漲跌幅 (%)", 
                                      "📊 成交量變動幅 (%)","Close_Difference", "異動標記",
-                                     "成交量標記", "K線形態", "單根解讀"]].tail(15)
+                                     "成交量標記", "K線形態", "單根解讀", "VWAP", "MFI", "OBV", "VIX"]].tail(15)
                 if not display_data.empty:
                     st.dataframe(
                         display_data,
